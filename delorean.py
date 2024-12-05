@@ -7,8 +7,11 @@
 # 	- Several style fixes.
 
 # General Imports
-from optparse import OptionParser
+import argparse 
+import ipaddress
+import os
 import socket
+import sys
 import threading
 import datetime
 import struct
@@ -16,8 +19,8 @@ import time
 import math
 import re
 import random
-import sys
-import os
+
+NTP_PORT_DEFAULT = 123
 
 BANNER = r'''
                                         _._                                          
@@ -31,6 +34,18 @@ BANNER = r'''
       V__________: \        / :_|=======================/_____: \        / :__-"     
       -----------'  ""____""  `-------------------------------'  ""____""            
 '''
+
+class CommandLineArgs(argparse.Namespace):
+    def __init__(self) -> None:
+        super().__init__()
+        self.ip_address: str
+        self.port: int
+        self.nobanner: bool
+        self.force_step: str
+        self.force_date: str
+        self.skim_step: str
+        self.skim_threshold: str
+        self.random_date: bool
 
 # NTP-Proxy Class
 class NTProxy(threading.Thread):
@@ -337,119 +352,96 @@ class NTProxy(threading.Thread):
         # int(abs(timestamp - int(timestamp)) * 2**32)
         return packed
 
+def main(args: CommandLineArgs) -> None:
+    # Bind Socket and Start Thread
+    ntpSocket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    ntpSocket.bind((args.ip_address, args.port))
+    NTP_Thread = NTProxy(ntpSocket)
+    if args.random_date:
+        NTP_Thread.force_random(True)
+    else:
+        NTP_Thread.set_skim_threshold(args.skim_threshold)
+        if args.skim_step:
+            NTP_Thread.set_skim_step(args.skim_step)
+        if args.force_step:
+            NTP_Thread.force_step(args.force_step)
+        if args.force_date:
+            NTP_Thread.force_date(args.force_date)
 
-# Usage and options
-usage = "usage: %prog [options]"
-parser = OptionParser(usage=usage)
-parser.add_option(
-    "-i",
-    "--interface",
-    type="string",
-    dest="interface",
-    default="0.0.0.0",
-    help="Listening interface",
-)
-parser.add_option(
-    "-p", "--port", type="int", dest="port", default="123", help="Listening port"
-)
-parser.add_option(
-    "-n",
-    "--nobanner",
-    action="store_false",
-    dest="banner",
-    default=True,
-    help="Not show Delorean banner",
-)
-parser.add_option(
-    "-s",
-    "--force-step",
-    type="string",
-    dest="step",
-    help="Force the time step: 3m (minutes), 4d (days), 1M (month)",
-)
-parser.add_option(
-    "-d",
-    "--force-date",
-    type="string",
-    dest="date",
-    help="Force the date: YYYY-MM-DD hh:mm[:ss]",
-)
-parser.add_option(
-    "-k",
-    "--skim-step",
-    type="string",
-    dest="skim",
-    help="Skimming step: 3m (minutes), 4d (days), 1M (month)",
-)
-parser.add_option(
-    "-t",
-    "--skim-threshold",
-    type="string",
-    dest="threshold",
-    default="30s",
-    help="Skimming Threshold: 3m (minutes), 4d (days), 1M (month)",
-)
-parser.add_option(
-    "-x",
-    "--random-date",
-    action="store_true",
-    dest="random",
-    default=False,
-    help="Use random date each time",
-)
-(options, args) = parser.parse_args()
-ifre = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+")
-fsre = re.compile(r"[-]?[0-9]+[smhdwMy]?")
-fdre = re.compile(r"[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] [0-9][0-9]:[0-9][0-9](:[0-9][0-9])?")
-# Check options
-if (
-    not options.interface
-    or not ifre.match(options.interface)
-    or options.port < 1
-    or options.port > 65535
-    or (options.step and options.date)
-    or
-    # ( options.skim and not (options.step or options.date) ) or
-    (options.random and (options.step or options.date))
-    or (options.step and not fsre.match(options.step))
-    or (options.date and not fdre.match(options.date))
-    or (options.skim and not fsre.match(options.skim))
-    or (options.threshold and not fsre.match(options.threshold))
-):
-    parser.print_help()
-    exit()
+    # Lets go to the future
+    if not args.nobanner:
+        print(BANNER)
 
-# Check if root
-if options.port <= 1024 and os.geteuid() != 0:
-    sys.exit("Delorean must be run as root when binding ports under 1024")
+    # Wait until Keyboard Interrupt
+    try:
+        NTP_Thread.start()
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("Kill signal sent...")
+        NTP_Thread.stop()
+        NTP_Thread.join()
+        ntpSocket.close()
+        print("Exited")
 
-# Bind Socket and Start Thread
-socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-socket.bind((options.interface, options.port))
-NTP_Thread = NTProxy(socket)
-if options.random:
-    NTP_Thread.force_random(True)
-else:
-    NTP_Thread.set_skim_threshold(options.threshold)
-    if options.skim:
-        NTP_Thread.set_skim_step(options.skim)
-    if options.step:
-        NTP_Thread.force_step(options.step)
-    if options.date:
-        NTP_Thread.force_date(options.date)
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Delorean (NTP server written in Python)")
+    
+    def validate_step(value: str) -> str:
+        fsre = re.compile(r"[-]?[0-9]+[smhdwMy]?")
+        if not fsre.match(value):
+            parser.error(f"Failed to parse step {value}")
 
-# Lets go to the future
-if options.banner:
-    print(BANNER)
+        return value
 
-# Wait until Keyboard Interrupt
-try:
-    NTP_Thread.start()
-    while True:
-        time.sleep(1)
-except KeyboardInterrupt:
-    print("Kill signal sent...")
-    NTP_Thread.stop()
-    NTP_Thread.join()
-    socket.close()
-    print("Exited")
+    def validate_date(value: str) -> str:
+        fdre = re.compile(r"[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] [0-9][0-9]:[0-9][0-9](:[0-9][0-9])?")
+        if not fdre.match(value):
+            parser.error(f"Failed to parse date {value}")
+
+        return value
+
+    def validate_address(value: str) -> str:
+        try:
+            ipaddress.ip_address(value)
+        except ValueError:
+            parser.error(f"Failed to parse address {value}")
+
+        return value
+
+    def validate_port(value: str) -> int:
+        try:
+            port = int(value)
+        except ValueError:
+            parser.error(f"Failed to parse port number {value}")
+
+        if port < 1 or port > 65535:
+            parser.error(f"Invalid port number: {value}. Must be between 1 and 65535.")
+
+        return port
+
+    parser.add_argument("-i", "--ip-address", type=validate_address, default="0.0.0.0", help="Listening ip address")
+    parser.add_argument("-p", "--port", type=validate_port, default=NTP_PORT_DEFAULT, help="Listening port")
+    parser.add_argument("-n", "--nobanner", action="store_true", help="Do not show Delorean banner")
+    parser.add_argument("-s", "--force-step", type=validate_step, help="Force the time step: 3m (minutes), 4d (days), 1M (month)")
+    parser.add_argument("-d", "--force-date", type=validate_date, help="Force the date: YYYY-MM-DD hh:mm[:ss]")
+    parser.add_argument("-k", "--skim-step", type=validate_step, help="Skimming step: 3m (minutes), 4d (days), 1M (month)")
+    parser.add_argument("-t", "--skim-threshold", type=validate_step, default="30s", help="Skimming Threshold: 3m (minutes), 4d (days), 1M (month)")
+    parser.add_argument("-x", "--random-date", action="store_true", help="Use random date each time")
+
+    args: CommandLineArgs = parser.parse_args()
+
+    if args.force_step and args.force_date:
+        sys.exit("Step and date can't be simultaneously enforced! Exiting")
+    
+    if args.skim_step and not (args.force_step or args.force_date):
+        sys.exit("Can't specify skim step without enforcing step / date! Exiting")
+    
+    if args.random_date and (args.force_step or args.force_date):
+        sys.exit("Time can't be random and forced at the same time! Exiting")
+
+    # Check if root
+    if args.port <= 1024 and os.geteuid() != 0:
+        sys.exit("Delorean must be run as root when binding ports under 1024")
+
+    main(args)
